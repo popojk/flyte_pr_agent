@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: flyte-pr-agent
+Version: 0.1.0
+Summary: A Flyte-based PR agent project
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: flyte==2.0.0b25
+Requires-Dist: langchain>=0.1.0
+Requires-Dist: langchain-openai>=0.1.0
+Requires-Dist: langchain-core>=0.1.0
+Requires-Dist: pytest>=7.0.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: black>=23.0.0; extra == "dev"
+Requires-Dist: ruff>=0.1.0; extra == "dev"
+
+# flyte_pr_agent

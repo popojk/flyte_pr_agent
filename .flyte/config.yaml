@@ -1,0 +1,42 @@
+admin:
+#  endpoint: dns:///localhost:8090
+  # endpoint: dns:///playground.canary.unionai.cloud
+#  endpoint: dns:///dogfood-gcp.cloud-staging.union.ai
+#  endpoint: dns:///dogfood.cloud-staging.union.ai
+#   endpoint: dns:///serving-mvp.us-west-2.union.ai
+  # endpoint: dns:///dragonfly.eu-central-1.unionai.cloud
+  # endpoint: dns:///tryv2.hosted.unionai.cloud
+  endpoint: dns:///demo.hosted.unionai.cloud
+#  authType: Pkce
+  insecure: False
+logger:
+  show-source: true
+  level: 0
+
+image:
+  builder: remote
+
+#local
+#task:
+# org: testorg
+# project: testproject
+# domain: development
+
+
+# dogfood gcp
+#task:
+#   org: dogfood-gcp
+#   project: flytesnacks
+#   domain: development
+
+# dogfood
+#task:
+#  org: dogfood
+#  project: flytesnacks
+#  domain: development
+
+# demo host
+task:
+   org: demo
+   project: flytesnacks
+   domain: development
