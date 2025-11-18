@@ -23,11 +23,11 @@ env = flyte.TaskEnvironment(
     resources=flyte.Resources(
         memory=("2Gi", "12Gi"),
     ),
-    image = flyte.Image.from_debian_base().with_env_vars({"OPENAI_API_KEY": os.getenv("OPENAI_API_KEY")}).with_apt_packages("git", "make").with_uv_project(pyproject_file=Path("pyproject.toml"), project_install_mode="dependencies_only")
+    image = flyte.Image.from_debian_base().with_env_vars({"OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"), "GITHUB_TOKEN": os.getenv("GITHUB_TOKEN")}).with_apt_packages("git", "make").with_uv_project(pyproject_file=Path("pyproject.toml"), project_install_mode="dependencies_only")
 )
 
 @env.task
-async def pull_pr_branch(git_url: str, github_token: str = "") -> Dir:
+async def pull_pr_branch(git_url: str) -> Dir:
     """
     Pull PR branch code to local directory
 
@@ -35,11 +35,12 @@ async def pull_pr_branch(git_url: str, github_token: str = "") -> Dir:
         git_url: Git URL, format can be:
                 - "https://github.com/owner/repo/pull/123" (GitHub PR URL)
                 - "https://github.com/user/repo.git" (regular git URL)
-        github_token: GitHub personal access token for authentication (optional for public repos)
 
     Returns:
         Dir object containing the cloned repository
     """
+    # Get GitHub token from environment variable
+    github_token = os.getenv("GITHUB_TOKEN", "")
     # Check if this is a GitHub PR URL
     pr_pattern = r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)'
     pr_match = re.match(pr_pattern, git_url)
@@ -163,12 +164,13 @@ async def flyte_sdk_unit_test(file_dir: Dir):
         logging.debug("=" * 80)
 
 @env.task
-async def flyte_sdk_lint_fix(file_dir: Dir) -> Dir:
+async def flyte_sdk_lint_fix(file_dir: Dir, git_url: str) -> Dir:
     """
-    Run make fmt to format code
+    Run make fmt to format code, commit and push if there are changes
 
     Args:
         file_dir: Directory containing the repository code
+        git_url: GitHub PR URL for extracting owner/repo info
 
     Returns:
         Dir object containing the formatted repository
@@ -185,65 +187,22 @@ async def flyte_sdk_lint_fix(file_dir: Dir) -> Dir:
         text=True
     )
 
-    # Log formatter output
-    logging.debug("=" * 80)
-    logging.debug("Code formatter output:")
-    logging.debug("=" * 80)
-    if result.stdout:
-        logging.debug(result.stdout)
-    if result.stderr:
-        logging.debug("Formatter stderr:")
-        logging.debug(result.stderr)
+    # Check if there are any changes after formatting
+    status_result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(local_path),
+        capture_output=True,
+        text=True,
+        check=True
+    )
 
-    # Check formatter result and log accordingly
-    if result.returncode == 0:
-        logging.debug("=" * 80)
-        logging.debug("✓ Code formatting completed successfully!")
-        logging.debug("=" * 80)
-    else:
-        logging.debug("=" * 80)
-        logging.debug(f"✗ Code formatting failed with exit code {result.returncode}")
-        logging.debug("=" * 80)
+    changes = status_result.stdout.strip()
 
-    # Upload the modified directory back to Dir
-    formatted_dir = await Dir.from_local(local_path)
-    return formatted_dir
-
-@env.task
-async def commit_changes(file_dir: Dir) -> Dir:
-    """
-    Commit changes if any exist with auto lint fix message
-
-    Args:
-        file_dir: Directory containing the repository code
-
-    Returns:
-        Dir object containing the repository with committed changes
-    """
-    # Download Dir to local path
-    local_path = await file_dir.download()
-    logging.debug(f"Checking for changes in: {local_path}")
-
-    try:
-        # Check if there are any changes
-        status_result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=str(local_path),
-            capture_output=True,
-            text=True,
-            check=True
-        )
-
-        changes = status_result.stdout.strip()
-
-        if not changes:
-            logging.debug("No changes to commit")
-            return file_dir
-
-        logging.debug(f"Found changes:\n{changes}")
+    if changes:
+        logging.debug(f"Found formatting changes:\n{changes}")
 
         # Stage all changes
-        add_result = subprocess.run(
+        subprocess.run(
             ["git", "add", "."],
             cwd=str(local_path),
             capture_output=True,
@@ -265,15 +224,73 @@ async def commit_changes(file_dir: Dir) -> Dir:
         logging.debug(commit_result.stdout)
         logging.debug("=" * 80)
 
-        # Upload the modified directory back to Dir
-        updated_dir = await Dir.from_local(local_path)
-        return updated_dir
+        # Extract owner and repo from git_url
+        pr_pattern = r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)'
+        pr_match = re.match(pr_pattern, git_url)
 
-    except subprocess.CalledProcessError as e:
-        error_msg = f"Failed to commit changes: {e.stderr}"
-        logging.debug(error_msg)
-        # Return original dir even if commit fails
-        return file_dir
+        if pr_match:
+            owner = pr_match.group(1)
+            repo = pr_match.group(2)
+
+            # Get GitHub token from environment
+            github_token = os.getenv("GITHUB_TOKEN", "")
+
+            if github_token:
+                # Get current branch name
+                current_branch_result = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    cwd=str(local_path),
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                current_branch = current_branch_result.stdout.strip()
+
+                logging.debug(f"Pushing to origin/{current_branch}...")
+
+                # Configure git to use token for authentication
+                push_url = f"https://{github_token}@github.com/{owner}/{repo}.git"
+
+                # Set remote URL temporarily for this push
+                subprocess.run(
+                    ["git", "remote", "set-url", "origin", push_url],
+                    cwd=str(local_path),
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+
+                # Push the commit
+                push_result = subprocess.run(
+                    ["git", "push", "origin", current_branch],
+                    cwd=str(local_path),
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+
+                logging.debug("=" * 80)
+                logging.debug("Push output:")
+                if push_result.stdout:
+                    logging.debug(push_result.stdout)
+                if push_result.stderr:
+                    logging.debug(push_result.stderr)
+                logging.debug("=" * 80)
+
+                if push_result.returncode == 0:
+                    logging.debug("Successfully pushed lint fix commit to remote")
+                else:
+                    logging.debug(f"Push completed with return code: {push_result.returncode}")
+            else:
+                logging.debug("No GitHub token available, skipping push")
+        else:
+            logging.debug("Could not parse git_url, skipping push")
+    else:
+        logging.debug("No formatting changes to commit")
+
+    # Upload the modified directory back to Dir
+    formatted_dir = await Dir.from_local(local_path)
+    return formatted_dir
 
 @env.task
 async def commit_code_review(file_dir: Dir) -> str:
@@ -475,19 +492,20 @@ Provide a code review with specific suggestions for improvement.""")
         return f"Error: {error_msg}"
 
 @env.task
-async def generate_pr_description_and_commit(file_dir: Dir, git_url: str, github_token: str = "", code_review: str = "") -> str:
+async def generate_pr_description_and_commit(file_dir: Dir, git_url: str, code_review: str = "") -> str:
     """
     Generate PR description using AI and update the PR on GitHub
 
     Args:
         file_dir: Directory containing the repository code
         git_url: GitHub PR URL (e.g., https://github.com/owner/repo/pull/123)
-        github_token: GitHub token for authentication
         code_review: Code review results to include in PR description
 
     Returns:
         Generated PR description
     """
+    # Get GitHub token from environment variable
+    github_token = os.getenv("GITHUB_TOKEN", "")
     from langchain_openai import ChatOpenAI
     from langchain_core.messages import HumanMessage, SystemMessage
     import json
@@ -519,46 +537,6 @@ async def generate_pr_description_and_commit(file_dir: Dir, git_url: str, github
         )
         current_branch = current_branch_result.stdout.strip()
         logging.debug(f"Current branch: {current_branch}")
-
-        # Force push to remote if we have a github token
-        if github_token:
-            logging.debug(f"Pushing to origin/{current_branch}...")
-
-            # Configure git to use token for authentication
-            push_url = f"https://{github_token}@github.com/{owner}/{repo}.git"
-
-            # Set remote URL temporarily for this push
-            subprocess.run(
-                ["git", "remote", "set-url", "origin", push_url],
-                cwd=str(local_path),
-                capture_output=True,
-                text=True,
-                check=True
-            )
-
-            # Force push the commits
-            push_result = subprocess.run(
-                ["git", "push", "origin", current_branch],
-                cwd=str(local_path),
-                capture_output=True,
-                text=True,
-                check=False  # Don't fail if nothing to push
-            )
-
-            logging.debug("=" * 80)
-            logging.debug("Push output:")
-            if push_result.stdout:
-                logging.debug(push_result.stdout)
-            if push_result.stderr:
-                logging.debug(push_result.stderr)
-            logging.debug("=" * 80)
-
-            if push_result.returncode == 0:
-                logging.debug("Successfully pushed to remote")
-            else:
-                logging.debug(f"Push completed with return code: {push_result.returncode}")
-        else:
-            logging.debug("No GitHub token available, skipping push")
 
         # Get the diff against the base branch using merge-base
         # This ensures we only get changes from this PR, not other commits
@@ -770,13 +748,12 @@ Generate a well-structured PR description in Markdown format.""")
 
 
 @env.task
-async def flyte_sdk_workflow(git_url: str, github_token: str = "", files_dir: Dir = None) -> Dir:
+async def flyte_sdk_workflow(git_url: str, files_dir: Dir = None) -> Dir:
     """
     Run flyte-sdk specific workflow tasks in parallel
 
     Args:
         git_url: Git URL of the repository
-        github_token: GitHub token for authentication
         files_dir: Directory containing the repository code
 
     Returns:
@@ -796,16 +773,16 @@ async def flyte_sdk_workflow(git_url: str, github_token: str = "", files_dir: Di
 
 
 @env.task
-async def wf(git_url: str, github_token: str = ""):
-    files_dir = await pull_pr_branch(git_url, github_token)
-    # if git_url.startswith("https://github.com/flyteorg/flyte-sdk"):
-    #     files_dir = await flyte_sdk_workflow(git_url, github_token, files_dir)
+async def wf(git_url: str):
+    files_dir = await pull_pr_branch(git_url)
+    if git_url.startswith("https://github.com/flyteorg/flyte-sdk"):
+        files_dir = await flyte_sdk_workflow(git_url, files_dir)
 
     # Run code review and get results
     code_review_result = await commit_code_review(files_dir)
 
     # Generate PR description with code review included
-    await generate_pr_description_and_commit(files_dir, git_url, github_token, code_review_result)
+    await generate_pr_description_and_commit(files_dir, git_url, code_review_result)
 
 
 if __name__ == "__main__":
@@ -813,19 +790,17 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 
     flyte.init_from_config()
-
-    # Get GitHub token from environment variable
-    github_token = os.getenv("GITHUB_TOKEN", "")
-    if github_token:
-        logging.debug("GitHub token found in environment")
+    openai_api_key = os.getenv("OPENAI_API_KEY", "")
+    if openai_api_key:
+        logging.debug("OpenAI API key found in environment")
     else:
-        logging.debug("No GitHub token found in environment")
+        logging.debug("No OpenAI API key found in environment")
 
     run = flyte.with_runcontext(
         log_level=logging.DEBUG,
         overwrite_cache=True,
         interruptible=False,
-    ).run(wf, git_url="https://github.com/flyteorg/flyte-sdk/pull/341", github_token=github_token)
+    ).run(wf, git_url="https://github.com/flyteorg/flyte-sdk/pull/341")
     logging.debug(f"Run name: {run.name}")
     logging.debug(f"Run URL: {run.url}")
     run.wait()
